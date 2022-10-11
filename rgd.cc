@@ -83,6 +83,7 @@ uint64_t start_time;
 uint8_t input_buffer[64][8092];
 
 bool gd_entry(struct FUT* dut);
+void sample(struct FUT* fut);
 
 namespace rgd {
   //ugly implementation for expressions
@@ -1154,7 +1155,8 @@ static int addFunction(const JitRequest* request,
   llvm::raw_ostream *stream = &llvm::outs();
   llvm::verifyFunction(*fooFunc, stream);
 #if 1
-  //	TheModule->print(llvm::errs(),nullptr);
+  printExpression(request);
+  TheModule->print(llvm::errs(),nullptr);
 #endif
 
   JIT->addModule(std::move(TheModule),std::move(TheCtx));
@@ -1676,7 +1678,7 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
   std::deque<FUT*> tasks;
   if (checkContra(cmd)) return -1;
   try {
-    parseRequest(opti, cmd, i, tasks,funcCache);
+    parseRequest(opti, cmd, i, tasks, funcCache);
     uint64_t parsing = getTimeStamp() - start;
     parsing_total += parsing;
 
@@ -1824,7 +1826,9 @@ void* rgdTask(void *threadarg) {
     uint64_t start = getTimeStamp();
 #if NESTED_BRANCH
     if (cmdDoneOpt->expr(0).kind() != rgd::Memcmp) {
-      int r = sendLocalCmd(true, cmdDoneOpt, i, Expr2FuncList[i],&rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
+      int r = sendLocalCmd(true, cmdDoneOpt, i, Expr2FuncList[i],
+        &rgd_solution, &opti_solution, &hint_solution, 
+        cmdDone->file_name(), &st, &iter);
     }
 
     if (rgd_solution.size() != 0)  {
@@ -1832,7 +1836,9 @@ void* rgdTask(void *threadarg) {
       iter = 0;
       rgd_solution.clear();
       if (cmdDone->expr(0).kind() != rgd::Memcmp) {
-        int r = sendLocalCmd(false, cmdDone, i, Expr2FuncList[i],&rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
+        int r = sendLocalCmd(false, cmdDone, i, Expr2FuncList[i],
+          &rgd_solution, &opti_solution, &hint_solution, 
+          cmdDone->file_name(), &st, &iter);
       }
     } 
     //else {

@@ -130,6 +130,12 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     //std::cout << std::endl;
     cur = (uint64_t)c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison,fut->scratch_args[0],fut->scratch_args[1]);
+#if 1
+    std::cerr << "[ret value]: " << cur << std::endl;
+    std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
+    std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
+#endif
+
     fut->distances[i] = dis;
     if(i==0) dis0 = dis;
     /*
@@ -362,10 +368,10 @@ uint64_t repick_start_point(MutInput &input_min, struct FUT* fut) {
 
 uint64_t reload_input(MutInput &input_min,struct FUT* fut) {
   input_min.assign(fut->inputs);
-#if 0
+#if 1
   printf("assign realod\n");
   for(auto itr : fut->inputs) {
-    printf("offset %u value %u\n", itr.first,itr.second);
+    printf("offset %u value %u\n", itr.first, itr.second);
   }
 #endif
   uint64_t ret = distance(input_min,fut);
@@ -373,9 +379,6 @@ uint64_t reload_input(MutInput &input_min,struct FUT* fut) {
   return ret;
   return distance(input_min,fut);
 }
-
-
-
 
 bool gd_entry(struct FUT* fut) {
   MutInput input(fut->inputs.size());
@@ -390,7 +393,7 @@ bool gd_entry(struct FUT* fut) {
   int ep_i = 0;
 
   Grad grad(input.len());
-
+  /*
   while (true) {
     //std::cout << "<<< epoch=" << ep_i << " f0=" << f0 << std::endl;
     if (fut->stopped) {
@@ -424,6 +427,32 @@ bool gd_entry(struct FUT* fut) {
     f0 = descend(input, scratch_input,f0, grad,fut);
     ep_i += 1;
   }
-
+  */
   return fut->gsol;
+}
+
+void sample(struct FUT* fut) {
+  uint64_t ret = 0;
+
+  MutInput input(fut->inputs.size());
+  input.assign(fut->inputs);
+
+  // assign function args
+  for (int i=0; i<fut->constraints.size(); ++i) {
+    int arg_idx = 0;
+    std::shared_ptr<Constraint> c = fut->constraints[i];
+    for (auto arg : fut->constraintsmeta[i]->input_args_final) {
+      if (arg.first) { // symbolic 
+        fut->scratch_args[2+arg_idx] = (uint64_t) input.value[arg.second];
+      } else { // constant
+        fut->scratch_args[2+arg_idx] = arg.second;
+      }
+      ++arg_idx;
+    }
+
+    ret = (uint64_t) c->fn(fut->scratch_args);
+    std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
+    std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
+  }
+
 }

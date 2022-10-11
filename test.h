@@ -29,7 +29,7 @@ public:
 class ConsMeta {
 public:
 	std::vector<std::pair<bool, uint64_t>> input_args_final;
-  uint32_t index;
+  	uint32_t index;
 };
 
 struct FUT {  
