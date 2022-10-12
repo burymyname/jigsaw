@@ -130,7 +130,7 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     //std::cout << std::endl;
     cur = (uint64_t)c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison,fut->scratch_args[0],fut->scratch_args[1]);
-#if 1
+#if 0
     std::cerr << "[ret value]: " << cur << std::endl;
     std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
     std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
@@ -368,7 +368,7 @@ uint64_t repick_start_point(MutInput &input_min, struct FUT* fut) {
 
 uint64_t reload_input(MutInput &input_min,struct FUT* fut) {
   input_min.assign(fut->inputs);
-#if 1
+#if 0
   printf("assign realod\n");
   for(auto itr : fut->inputs) {
     printf("offset %u value %u\n", itr.first, itr.second);
@@ -377,7 +377,7 @@ uint64_t reload_input(MutInput &input_min,struct FUT* fut) {
   uint64_t ret = distance(input_min,fut);
   fut->orig_distances = fut->distances;
   return ret;
-  return distance(input_min,fut);
+  // return distance(input_min,fut);
 }
 
 bool gd_entry(struct FUT* fut) {
@@ -431,14 +431,16 @@ bool gd_entry(struct FUT* fut) {
   return fut->gsol;
 }
 
-void sample(struct FUT* fut) {
+void runFunction(MutInput &input, struct FUT* fut, 
+  std::string out_dir, uint64_t count) {
   uint64_t ret = 0;
 
-  MutInput input(fut->inputs.size());
-  input.assign(fut->inputs);
-
+  std::string file_prefix = out_dir + "/fit" + std::to_string(count);
   // assign function args
   for (int i=0; i<fut->constraints.size(); ++i) {
+    std::cout << "[fname]" << fut->constraints[i]->fname << std::endl;
+    std::string filename = file_prefix + "_" + fut->constraints[i]->fname;
+    FILE *fptr = fopen(filename.c_str(), "w+");
     int arg_idx = 0;
     std::shared_ptr<Constraint> c = fut->constraints[i];
     for (auto arg : fut->constraintsmeta[i]->input_args_final) {
@@ -451,8 +453,21 @@ void sample(struct FUT* fut) {
     }
 
     ret = (uint64_t) c->fn(fut->scratch_args);
-    std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
-    std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
+    if (fptr) {
+      fprintf(fptr, "[left value]: %lu\n", fut->scratch_args[0]);
+      fprintf(fptr, "[right value]: %lu\n", fut->scratch_args[1]);
+      fprintf(fptr, "[return]: %lu\n", ret);
+    }
+    // std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
+    // std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
   }
 
 }
+
+void sample(struct FUT* fut, std::string out_dir, uint64_t count) {
+  MutInput input(fut->inputs.size());
+  input.assign(fut->inputs);
+
+  runFunction(input, fut, out_dir, count);
+}
+

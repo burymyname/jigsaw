@@ -78,12 +78,13 @@ int core_start = 0;
 std::unique_ptr<GradJit> JIT;// = make_unique<GradJit>();
 uint64_t getTimeStamp();
 void printExpression(const JitRequest* req);
-uint64_t start_time;
 
+uint64_t start_time;
 uint8_t input_buffer[64][8092];
 
 bool gd_entry(struct FUT* dut);
-void sample(struct FUT* fut);
+void sample(struct FUT* fut, std::string out_dir, uint64_t count);
+static std::string output_dir;
 
 namespace rgd {
   //ugly implementation for expressions
@@ -167,6 +168,11 @@ namespace rgd {
     consKV(std::tuple<uint32_t,uint32_t,uint32_t> l, std::shared_ptr<Constraint> acon) : label(l), cons(acon) {}
   };
 
+  struct fnKV {
+    std::shared_ptr<JitRequest> req;
+    std::string fname;
+    fnKV(std::shared_ptr<JitRequest> areq, std::string name) : req(areq), fname(name) {}
+  };
 
   struct myHash {
     using eType = struct myKV*;
@@ -176,11 +182,10 @@ namespace rgd {
     int hash(kType v) {return v->hash();} //hash64_2(v);}
   //int hash(kType v) {return hash64_2(v);}
   //int cmp(kType v, kType b) {return (v > b) ? 1 : ((v == b) ? 0 : -1);}
-  int cmp(kType v, kType b) {return (isEqual(*v,*b)) ? 0 : -1;}
-  bool replaceQ(eType, eType) {return 0;}
-  eType update(eType v, eType) {return v;}
-  bool cas(eType* p, eType o, eType n) {return
-    atomic_compare_and_swap(p, o, n);}
+    int cmp(kType v, kType b) {return (isEqual(*v,*b)) ? 0 : -1;}
+    bool replaceQ(eType, eType) {return 0;}
+    eType update(eType v, eType) {return v;}
+    bool cas(eType* p, eType o, eType n) {return atomic_compare_and_swap(p, o, n);}
 };
 
 struct nestHash {
@@ -197,6 +202,21 @@ struct nestHash {
   bool cas(eType* p, eType o, eType n) {return
     atomic_compare_and_swap(p, o, n);}
     };
+
+  struct fnHash {
+    using eType = struct fnKV*;
+    using kType = std::shared_ptr<JitRequest>;
+    eType empty() {return nullptr;}
+    kType getKey(eType v) {return v->req;}
+    int hash(kType v) {return v->hash();} //hash64_2(v);}
+  //int hash(kType v) {return hash64_2(v);}
+  //int cmp(kType v, kType b) {return (v > b) ? 1 : ((v == b) ? 0 : -1);}
+  int cmp(kType v, kType b) {return (isEqual(*v,*b)) ? 0 : -1;}
+  bool replaceQ(eType, eType) {return 0;}
+  eType update(eType v, eType) {return v;}
+  bool cas(eType* p, eType o, eType n) {return
+    atomic_compare_and_swap(p, o, n);}
+};
 
 
 static inline uint32_t xxhash(uint32_t h1, uint32_t h2, uint32_t h3) {
@@ -292,6 +312,8 @@ static std::atomic<uint64_t> misssubexprs;
 static pbbs::Table<myHash> fCache(8000016,myHash(),1.3);
 static pbbs::Table<nestHash> nestCache(8000016,nestHash(),1.3);
 static pbbs::Table<consHash> consCache(8000016,consHash(),1.3);
+static pbbs::Table<fnHash> fNameCache(8000016,fnHash(),1.3);
+
 static std::mutex gg_mutex;
 static std::atomic<uint64_t> hit;
 static std::atomic<uint64_t> miss;
@@ -307,6 +329,8 @@ static std::atomic<uint64_t> parsing2_total;
 static std::atomic<uint64_t> parsing_total3;
 static std::atomic<uint64_t> iterations_total;
 static std::atomic<uint64_t> gCmdIdx(0);
+
+static std::atomic<uint64_t> taskCount;
 }
 
 
@@ -1473,11 +1497,15 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     copied_req->CopyFrom(*adjusted_request);
 
     struct myKV *res = fCache.find(copied_req);
+    // std::cerr << "[req name]: " << adjusted_request->name() << std::endl;
+  
     //		struct myKV *res = nullptr;
     if (res == nullptr) {
       miss++;
       uint64_t id = ++uuid;
       std::string funcName = "jutest" + std::to_string(id);
+      fNameCache.insert(new struct fnKV(copied_req, funcName));
+      constraint->fname = funcName;
       addFunction(adjusted_request, constraint->local_map ,funcName, expr_cache);
       auto fn = performJit(id,threadId);
       if (!fCache.insert(new struct myKV(copied_req, fn))) {
@@ -1488,7 +1516,13 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     } else {
       hit++;
       constraint->fn = res->fn;
+      struct fnKV *find = fNameCache.find(copied_req);
+      if (find != nullptr) {
+        constraint->fname = find->fname;
+      }
     }
+
+    //std::cerr << "[fname]: " << constraint->fname << std::endl;
 
     assert(isRelational(adjusted_request->kind()) && "non-relational expr");
     fut->constraints.push_back(constraint);
@@ -1683,6 +1717,7 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
     parsing_total += parsing;
 
     uint64_t start_solving = getTimeStamp();
+    // std::cout << "[solving start]==================" << std::endl;
     for (auto dut : tasks) {
       dut->start = getTimeStamp();
       dut->rgd_solution = rgd_solution;
@@ -1690,15 +1725,19 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
       dut->hint_solution = hint_solution;
       //dut->load_buf(fname);
       dut->load_hint();
-      bool suc = gd_entry(dut);
+      // dumpFut(dut);
+      sample(dut, output_dir, taskCount);
+
+      // bool suc = gd_entry(dut);
       uint64_t solving = getTimeStamp() - dut->start;
       solving_total += solving;
       iterations_total += dut->att;
       *iter  =  (*iter) + dut->att;
       *st = (*st) + getTimeStamp() - start_solving;
-      if (suc) {
-        break;
-      }
+      ++taskCount;
+      // if (suc) {
+      //   break;
+      // }
     }
     for (auto dut : tasks) {
       //free(dut->scratch_args);
@@ -1709,6 +1748,8 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
     std::cerr << "something is wrong, continue" << std::endl;
     return -1;
   }
+
+  // std::cout << "[solving end]==================" << std::endl;
 
   return 0;
 }
@@ -2069,8 +2110,8 @@ void* rgdTask(void *threadarg) {
   int main(int argc, char** argv) {
     int num_of_threads = 0;
     int pin_core_start = 0;
-    if (argc < 4) {
-      printf("Use: ./rgd number_of_threads pin_core_start directory\n");
+    if (argc < 5) {
+      printf("Use: ./rgd number_of_threads pin_core_start directory output_directory\n");
       printf("Example: ./rgd 32 0 0 test_dir\n");
       return 0;
     }
@@ -2082,9 +2123,16 @@ void* rgdTask(void *threadarg) {
       fprintf(stderr, "error - not an integer, aborting...\n");
       return 0;
     }
+    boost::filesystem::path output_path(argv[4]);
+    if (!exists(output_path)) {
+      fprintf(stderr, "error - output dir not exists aborting...\n");
+      return 0;
+    }
+
     std::cout << " number of threads " << num_of_threads << std::endl;
     std::cout << " pin_core_start " << pin_core_start << std::endl;
     core_start = pin_core_start;
+    output_dir = argv[4];
     ReplayLocal(argv, num_of_threads);
     return 0;
   }
