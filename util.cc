@@ -6,8 +6,12 @@
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <llvm/Support/raw_ostream.h>
+
 using namespace google::protobuf::io;
 using namespace rgd;
+using namespace llvm;
+
 const uint64_t kUsToS = 1000000;
 uint64_t getTimeStamp() {
 	struct timeval tv;
@@ -67,6 +71,7 @@ static std::string get_name(uint32_t kind) {
 		case rgd::Memcmp: return "memcmp";
 	}
 }
+
 static void do_print(const JitRequest* req) {
 	std::cerr << get_name(req->kind()) << "(";
 	//std::cerr << req->name() << "(";
@@ -130,6 +135,39 @@ void printExpression(const JitRequest* req) {
 	std::cerr << std::endl;
 }
 
+static void do_print_llvm(const JitRequest* req, llvm::raw_ostream &OS) {
+	OS << get_name(req->kind()) << "(";
+	//std::cerr << req->name() << "(";
+	OS << "width=" << req->bits() << ",";
+	//std::cerr << " hash=" << req->hash() << ",";
+	OS << " label=" << req->label() << ",";
+	//std::cerr << " hash=" << req->hash() << ",";
+	if (req->kind() == rgd::Bool) {
+		OS << req->value();
+	}
+	if (req->kind() == rgd::Constant) {
+		OS << req->value() << ", ";
+	//	std::cerr << req->index();
+	}
+	if (req->kind() == rgd::Memcmp) {
+		OS << req->value() << ", ";
+	//	std::cerr << req->index();
+	}
+	if (req->kind() == rgd::Read || req->kind() == rgd::Extract) {
+		OS << req->index() << ", ";
+	}
+	for(int i = 0; i < req->children_size(); i++) {
+		do_print_llvm(&req->children(i), OS);
+		if (i != req->children_size() - 1)
+			OS << ", ";
+	}
+	OS << ")";
+}
+
+void dumpExpr(const JitRequest *req, llvm::raw_ostream &OS) {
+	do_print_llvm(req, OS);
+	OS << "\n";
+}
 
 static bool writeDelimitedTo(
 		const google::protobuf::MessageLite& message,

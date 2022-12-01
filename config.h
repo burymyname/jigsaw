@@ -2,4 +2,5 @@
 #define CONFIG_H_
 #define MAX_NUM_MINIMAL_OPTIMA_ROUND 32
 #define MAX_EXEC_TIMES 1000
+#define MAX_FIT_NUM 100
 #endif

@@ -43,7 +43,7 @@ message JitCmd {
 message JitRequest {
   uint32 kind = 1;
   uint32 boolvalue = 2;  //used by bool expr
-  uint32 bits = 3;
+  uint32 bits = 3; // value bit width
   string value = 4;  //used by constant expr
   repeated JitRequest children = 5;
   string name = 6;  //used for debugging

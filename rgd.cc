@@ -7,6 +7,7 @@
 #include <iostream>
 #include <unordered_map>
 #include <unordered_set>
+#include <queue>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +65,10 @@
 #define NESTED_BRANCH 1
 #define LOADING_LIMIT 1000000
 #define PROCESSING_LIMIT 1000000
+
+#define FUNCDIR "function"
+#define FITDIR "fit"
+
 using namespace pbbs;
 using namespace llvm;
 using namespace llvm::orc;
@@ -78,13 +83,19 @@ int core_start = 0;
 std::unique_ptr<GradJit> JIT;// = make_unique<GradJit>();
 uint64_t getTimeStamp();
 void printExpression(const JitRequest* req);
+void dumpExpr(const JitRequest *req, llvm::raw_ostream &OS);
 
 uint64_t start_time;
 uint8_t input_buffer[64][8092];
 
 bool gd_entry(struct FUT* dut);
 void sample(struct FUT* fut, std::string out_dir, uint64_t count);
+
 static std::string output_dir;
+static std::string func_dir;
+static std::string fit_dir;
+
+static std::unordered_map<std::string, uint64_t> func2hit;
 
 namespace rgd {
   //ugly implementation for expressions
@@ -338,11 +349,13 @@ static void dumpFut(FUT* fut) {
   std::cout << "dumping fut start -------------" << std::endl;
   //for(std::unordered_map<uint32_t,uint32_t>::iterator it=fut->global_map.begin();it!=fut->global_map.end();it++)
   //	std::cout << "first is " << it->first << " second is " << it->second << std::endl; 
+  printf("\tconstraint number: %lu\n", fut->constraints.size());
   for (auto c : fut->constraints) {
-    printf("constraint comparsison is %d\n",c->comparison);
+    printf("\tconstraint comparsison is %d\n", c->comparison);
+    printf("\tconstraint fname: %s\n", c->fname.c_str());
   }
   for (auto c: fut->inputs) {
-    printf("offset %u and value %u\n",c.first,c.second);
+    printf("\toffset %u and value %u\n",c.first, c.second);
   }
   std::cout << "dumping fut end-------------" << std::endl;
 }
@@ -430,8 +443,8 @@ for (int i = 0; i < request->children_size(); i++)
   analyzeExpr(request->mutable_children(i), hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool, expr_cache);
 }
 
-//global map: request->index() -> index in the Inputs. Inputs maps offset -> iv or 0
-// input_args: false, iv for const  / true, gidx for index in the  inputs
+// global map: request->index() -> index in the Inputs. Inputs maps offset -> iv or 0
+// input_args: false, iv for const  / true, gidx for index in the inputs
 static void mapArgs(JitRequest* req, 
     std::shared_ptr<Constraint> constraint,
     std::unordered_set<uint32_t> &visited) {
@@ -442,7 +455,7 @@ static void mapArgs(JitRequest* req,
     if (label!=0 && visited.count(label)==1)
       continue;
     visited.insert(label);
-    mapArgs(child, constraint ,visited);
+    mapArgs(child, constraint, visited);
   }
   XXH32_state_t state;
   XXH32_reset(&state,0);
@@ -455,8 +468,8 @@ static void mapArgs(JitRequest* req,
   if (req->kind() == rgd::Constant) {
     uint32_t start = (uint32_t)constraint->input_args_scratch.size();
     req->set_index(start);  //save index
-    llvm::StringRef ref(req->value());
-    llvm::APInt value(req->bits(), ref, 10);
+    llvm::StringRef ref(req->value()); // constant value
+    llvm::APInt value(req->bits(), ref, 10); // 10 is radix
     uint64_t iv = value.getZExtValue();
     constraint->input_args_scratch.push_back(std::make_pair(false,iv));
     constraint->const_num += 1;
@@ -471,15 +484,16 @@ static void mapArgs(JitRequest* req,
     uint64_t iv = 0;
     if (!req->value().empty()) {
       llvm::StringRef ref(req->value());
-      llvm::APInt value(req->bits(),ref,10);
+      llvm::APInt value(req->bits(), ref, 10);
       iv = value.getZExtValue();
     }
     size_t length = req->bits()/8;
-    for (int i=0;i<length;++i, iv>>=8) {
+    for (int i=0; i<length; ++i,iv>>=8) {
+      // split var into bytes
       uint32_t offset = req->index() + i;
       uint32_t arg_index = 0;
       auto itr = constraint->local_map.find(offset);
-      if ( itr == constraint->local_map.end()) {
+      if (itr == constraint->local_map.end()) {
         arg_index = (uint32_t)constraint->input_args_scratch.size();
         constraint->inputs.insert({offset,(uint8_t)(iv & 0xff)});
         constraint->local_map[offset] = arg_index;
@@ -495,6 +509,7 @@ static void mapArgs(JitRequest* req,
       req->set_hash(hash);
       // }
     }
+    constraint->var_num += 1;
   } else {
     if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
     //XXH32_update(&state, &kind, sizeof(kind));
@@ -1139,7 +1154,9 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
 static int addFunction(const JitRequest* request,
     std::unordered_map<uint32_t,uint32_t> &sym_map,
     std::string funcName,
-    std::unordered_map<uint32_t,JitRequest*> &expr_cache) {
+    std::unordered_map<uint32_t,JitRequest*> &expr_cache,
+    uint32_t var_num,
+    uint32_t const_num) {
 
   assert(isRelational(request->kind()) && "non-relational expr");
 
@@ -1179,8 +1196,13 @@ static int addFunction(const JitRequest* request,
   llvm::raw_ostream *stream = &llvm::outs();
   llvm::verifyFunction(*fooFunc, stream);
 #if 1
-  printExpression(request);
-  TheModule->print(llvm::errs(),nullptr);
+  // printExpression(request);
+  std::string fileName = func_dir + "/" + funcName;
+  std::error_code EC;
+  llvm::raw_fd_ostream funcFile(fileName, EC, sys::fs::F_None);
+  funcFile << var_num << " " << const_num << "\n";
+  dumpExpr(request, funcFile);
+  TheModule->print(funcFile, nullptr);
 #endif
 
   JIT->addModule(std::move(TheModule),std::move(TheCtx));
@@ -1376,8 +1398,6 @@ static JitRequest* negate(JitRequest* request) {
   return c;
 }
 
-
-
 static JitRequest* simplify(JitRequest* request) {
   // strip LNot
   if (request->kind() == rgd::LNot)
@@ -1504,9 +1524,15 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
       miss++;
       uint64_t id = ++uuid;
       std::string funcName = "jutest" + std::to_string(id);
+      
+      boost::filesystem::path constr_dir("_" + funcName);
+      boost::filesystem::create_directory(constr_dir);
+
       fNameCache.insert(new struct fnKV(copied_req, funcName));
       constraint->fname = funcName;
-      addFunction(adjusted_request, constraint->local_map ,funcName, expr_cache);
+      func2hit.emplace(funcName, 1);
+      addFunction(adjusted_request, constraint->local_map ,funcName, expr_cache, 
+        constraint->var_num, constraint->const_num);
       auto fn = performJit(id,threadId);
       if (!fCache.insert(new struct myKV(copied_req, fn))) {
         delete res;
@@ -1519,6 +1545,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
       struct fnKV *find = fNameCache.find(copied_req);
       if (find != nullptr) {
         constraint->fname = find->fname;
+        func2hit[find->fname] += 1;
       }
     }
 
@@ -1625,10 +1652,14 @@ static void parseRequest(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId,
   }
 
   for (auto &subgoal : ReqList) {
-    FUT *dut = constructTask(subgoal, threadId ,funcCache);
-    //dumpFut(dut);
-    if (dut)
-      tasks.push_back(dut);
+    for (auto &subExpr : subgoal) {
+      std::deque<JitRequest*> newList;
+      newList.push_back(subExpr);
+      FUT *dut = constructTask(newList, threadId ,funcCache);
+      //dumpFut(dut);
+      if (dut)
+        tasks.push_back(dut);
+    }
   }
 }
 
@@ -1726,7 +1757,7 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
       //dut->load_buf(fname);
       dut->load_hint();
       // dumpFut(dut);
-      sample(dut, output_dir, taskCount);
+      sample(dut, fit_dir, taskCount);
 
       // bool suc = gd_entry(dut);
       uint64_t solving = getTimeStamp() - dut->start;
@@ -1783,6 +1814,22 @@ bool readDelimitedFrom(
   return true;
 }
 
+static void createOutDir(std::string &outdir) {
+  func_dir = outdir + "/" + FUNCDIR;
+  fit_dir = outdir + "/" + FITDIR;
+
+  boost::filesystem::path functions(func_dir);
+  boost::filesystem::path fits(fit_dir);
+
+  if (!boost::filesystem::exists(functions)) {
+    boost::filesystem::create_directory(functions);
+  }
+
+  if (!boost::filesystem::exists(fits)) {
+    boost::filesystem::create_directory(fits);
+  }
+
+}
 
 int gGenerate = 0;
 //ctpl::thread_pool* gpool;
@@ -1899,7 +1946,7 @@ void* rgdTask(void *threadarg) {
       gFi++;
     }
     if (gProcessed % 1000==0) {
-      std::cout << "processed" << gProcessed << " constraints" << std::endl;
+      std::cout << "processed " << gProcessed << " constraints" << std::endl;
       std::cout << "elapsed time is " << getTimeStamp() - start_time <<  " cons cache lookup " << parsing_total3 << " iter " << iterations_total << " solved " << gFi << std::endl;
     }
 
@@ -2105,6 +2152,24 @@ void* rgdTask(void *threadarg) {
       << " irT " 	<< parsing2_total 
       << " hit " << hit
       << " mis " << miss << std::endl;
+
+    std::vector<std::pair<std::string, uint64_t>> tmps;
+    for (auto &it : func2hit) {
+      tmps.push_back(std::make_pair(it.first, it.second));
+    }
+    std::sort(tmps.begin(), tmps.end(), [](std::pair<std::string, uint64_t> &a, std::pair<std::string, uint64_t> &b) {
+      return a.second < b.second;
+    });
+
+    std::ofstream top_file;
+    top_file.open(output_dir + "top_func.log", std::ios::out | std::ios::trunc);
+    if (top_file.is_open()) {
+      for (auto &it : tmps) {
+        top_file << "[func] " << it.first << " " << it.second << std::endl;
+      }
+      top_file.flush();
+      top_file.close();
+    }
   }
 
   int main(int argc, char** argv) {
@@ -2123,6 +2188,7 @@ void* rgdTask(void *threadarg) {
       fprintf(stderr, "error - not an integer, aborting...\n");
       return 0;
     }
+
     boost::filesystem::path output_path(argv[4]);
     if (!exists(output_path)) {
       fprintf(stderr, "error - output dir not exists aborting...\n");
@@ -2132,7 +2198,10 @@ void* rgdTask(void *threadarg) {
     std::cout << " number of threads " << num_of_threads << std::endl;
     std::cout << " pin_core_start " << pin_core_start << std::endl;
     core_start = pin_core_start;
+
     output_dir = argv[4];
+    createOutDir(output_dir);
+
     ReplayLocal(argv, num_of_threads);
     return 0;
   }

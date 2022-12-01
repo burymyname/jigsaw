@@ -9,7 +9,9 @@
 
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
+
 void dumpResults(MutInput &input, struct FUT* fut) {
+  std::cout << "[dumpResult]" << std::endl;
   int i = 0;
   for (auto it : fut->inputs) {
     std::cout << "index is " << it.first << " result is " << (int)input.value[i] << std::endl;
@@ -31,6 +33,13 @@ void addOptiResults(MutInput &input, struct FUT* fut) {
   }
 }
 
+void dumpInput2File(MutInput &input, FILE *fp) {
+  fprintf(fp, "[input]: ");
+  for (int i=0; i<input.size_; ++i) {
+    fprintf(fp, "%d, ", input.value[i]);
+  }
+  fprintf(fp, "\n");
+}
 
 inline uint64_t sat_inc(uint64_t base, uint64_t inc) {
   return base+inc < base ? -1 : base+inc;
@@ -131,9 +140,12 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     cur = (uint64_t)c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison,fut->scratch_args[0],fut->scratch_args[1]);
 #if 0
-    std::cerr << "[ret value]: " << cur << std::endl;
-    std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
-    std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
+    dumpResults(input, fut);
+    std::cout << "[fname]: " << fut->constraints[i]->fname << std::endl;
+    // input.dump();
+    std::cout << "[ret value]: " << cur << std::endl;
+    std::cout << "[left value]: " << fut->scratch_args[0] << std::endl;
+    std::cout << "[right value]: " << fut->scratch_args[1] << std::endl;
 #endif
 
     fut->distances[i] = dis;
@@ -283,7 +295,8 @@ void cal_gradient(MutInput &input, uint64_t f0, Grad &grad, struct FUT *fut) {
 
 
 
-uint64_t descend(MutInput &input_min, MutInput &input, uint64_t f0, Grad &grad, struct FUT* fut) {
+uint64_t descend(MutInput &input_min, MutInput &input, 
+    uint64_t f0, Grad &grad, struct FUT* fut) {
   uint64_t f_last = f0;
   input = input_min;
   bool doDelta = false;
@@ -316,7 +329,7 @@ uint64_t descend(MutInput &input_min, MutInput &input, uint64_t f0, Grad &grad, 
         double movement = grad.get_value()[deltaIdx].pct * (double)step;
         input.update(deltaIdx,grad.get_value()[deltaIdx].sign,(uint64_t)movement);
 
-        single_distance(input,fut, deltaIdx);
+        single_distance(input, fut, deltaIdx);
         for (int i=0;i<fut->constraints.size();i++)
           f_new += fut->distances[i];
         fut->att += 1;
@@ -368,7 +381,7 @@ uint64_t repick_start_point(MutInput &input_min, struct FUT* fut) {
 
 uint64_t reload_input(MutInput &input_min,struct FUT* fut) {
   input_min.assign(fut->inputs);
-#if 0
+#if 1
   printf("assign realod\n");
   for(auto itr : fut->inputs) {
     printf("offset %u value %u\n", itr.first, itr.second);
@@ -393,13 +406,13 @@ bool gd_entry(struct FUT* fut) {
   int ep_i = 0;
 
   Grad grad(input.len());
-  /*
+  
   while (true) {
     //std::cout << "<<< epoch=" << ep_i << " f0=" << f0 << std::endl;
     if (fut->stopped) {
       break;
     }
-    cal_gradient(input, f0, grad,fut);
+    cal_gradient(input, f0, grad, fut);
 
     int g_i = 0;
 
@@ -418,56 +431,67 @@ bool gd_entry(struct FUT* fut) {
       grad.clear();
       cal_gradient(input,f0,grad,fut);
     }
+
     if (fut->stopped || g_i > MAX_NUM_MINIMAL_OPTIMA_ROUND) {
       //std::cout << "trapped in local optimia for too long" << std::endl;
       break;
     }
     //TODO
     grad.normalize();
-    f0 = descend(input, scratch_input,f0, grad,fut);
+    f0 = descend(input, scratch_input, f0, grad, fut);
     ep_i += 1;
   }
-  */
+  
   return fut->gsol;
 }
 
-void runFunction(MutInput &input, struct FUT* fut, 
-  std::string out_dir, uint64_t count) {
+
+// TODO: mutate input
+void runFunction(MutInput &input, struct FUT* fut, FILE *fptr) {
+  assert(fut->constraints.size() == 1 && "constraint size should be 1");
+
   uint64_t ret = 0;
+  int arg_idx = 0;
 
-  std::string file_prefix = out_dir + "/fit" + std::to_string(count);
+  if (fptr)
+    dumpInput2File(input, fptr);
+  
   // assign function args
-  for (int i=0; i<fut->constraints.size(); ++i) {
-    std::cout << "[fname]" << fut->constraints[i]->fname << std::endl;
-    std::string filename = file_prefix + "_" + fut->constraints[i]->fname;
-    FILE *fptr = fopen(filename.c_str(), "w+");
-    int arg_idx = 0;
-    std::shared_ptr<Constraint> c = fut->constraints[i];
-    for (auto arg : fut->constraintsmeta[i]->input_args_final) {
-      if (arg.first) { // symbolic 
-        fut->scratch_args[2+arg_idx] = (uint64_t) input.value[arg.second];
-      } else { // constant
-        fut->scratch_args[2+arg_idx] = arg.second;
-      }
-      ++arg_idx;
+  std::shared_ptr<Constraint> c = fut->constraints[0];
+  for (auto arg : fut->constraintsmeta[0]->input_args_final) {
+    if (arg.first) { // symbolic 
+      fut->scratch_args[2+arg_idx] = (uint64_t) input.value[arg.second];
+    } else { // constant
+      fut->scratch_args[2+arg_idx] = arg.second;
     }
-
-    ret = (uint64_t) c->fn(fut->scratch_args);
-    if (fptr) {
-      fprintf(fptr, "[left value]: %lu\n", fut->scratch_args[0]);
-      fprintf(fptr, "[right value]: %lu\n", fut->scratch_args[1]);
-      fprintf(fptr, "[return]: %lu\n", ret);
-    }
-    // std::cerr << "[left value]: " << fut->scratch_args[0] << std::endl;
-    // std::cerr << "[right value]: " << fut->scratch_args[1] << std::endl;
+    ++arg_idx;
   }
 
+  ret = (uint64_t) c->fn(fut->scratch_args);
+  if (fptr) {
+    fprintf(fptr, "[left value]: %lu\n", fut->scratch_args[0]);
+    fprintf(fptr, "[right value]: %lu\n", fut->scratch_args[1]);
+    fprintf(fptr, "[return]: %lu\n", ret);
+  }
 }
 
 void sample(struct FUT* fut, std::string out_dir, uint64_t count) {
-  MutInput input(fut->inputs.size());
-  input.assign(fut->inputs);
+  assert(fut->constraints.size() == 1 && "constraint size should be 1");
 
-  runFunction(input, fut, out_dir, count);
+  MutInput input(fut->inputs.size());
+  FILE *fp = nullptr;
+
+  std::string filename = out_dir + "/" + fut->constraints[0]->fname + "_fit" + std::to_string(count); 
+  fp = fopen(filename.c_str(), "w+");
+
+  input.assign(fut->inputs);
+  runFunction(input, fut, fp);
+
+  for (int i=0; i<MAX_FIT_NUM; ++i) {
+    input.randomize();
+    runFunction(input, fut, fp);
+  }
+
+  fclose(fp);
 }
 

@@ -60,10 +60,10 @@ MutInput& MutInput::operator =(const MutInput &other)
 }
 
 void MutInput::dump() {
-//	printf("dumping input and value size is %lu\n",value.size());
-	//for(auto i : value)
-//		printf("%d, ",i);
-//	printf("\n");
+	printf("dumping input and value size is %lu\n", size_);
+	for(size_t i=0; i<size_; ++i)
+		printf("%d, ", value[i]);
+	printf("\n");
 }
 
 void MutInput::randomize() {

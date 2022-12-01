@@ -13,22 +13,24 @@ void load_input(std::vector<std::pair<uint32_t,uint8_t>> &inputs, std::string in
 
 class Constraint {
 public:
-	test_fn_type fn;
-	uint32_t comparison;
-	std::string fname;
+	test_fn_type fn; // JIT function pointer
+	uint32_t comparison; // constraint relational op
+	std::string fname; // JIT function name
 
-	//map the offset to the idx in inputs_args
+	// map the offset to the idx in inputs_args
 	// if const {false, const value}, if symbolic {true, index in the inputs}
-	std::vector<std::pair<bool, uint64_t>> input_args_scratch;
-	std::unordered_map<uint32_t,uint32_t> local_map;
+	std::vector<std::pair<bool, uint64_t>> input_args_scratch; 
+	std::unordered_map<uint32_t, uint32_t> local_map;
 	//map the offset to iv
-	std::unordered_map<uint32_t,uint8_t> inputs;
+	std::unordered_map<uint32_t, uint8_t> inputs;
 	uint32_t const_num;
+	uint32_t var_num;
 };
 
 
 class ConsMeta {
 public:
+	// if const {false, const value}, if symbolic {true, index in the inputs}
 	std::vector<std::pair<bool, uint64_t>> input_args_final;
   	uint32_t index;
 };
@@ -55,10 +57,11 @@ struct FUT {
 	std::unordered_map<uint32_t,uint8_t> *hint_solution;  
 	std::vector<uint64_t> orig_distances;
 	std::vector<uint64_t> distances;
-	uint64_t* scratch_args;
+	uint64_t* scratch_args; // JIT function runtime args
 
-  std::unordered_map<uint32_t, std::vector<uint32_t>> cmap;
+	std::unordered_map<uint32_t, std::vector<uint32_t>> cmap;
 	//void allocate_scratch_args(int size) {scratch_args = (uint8_t*)aligned_alloc(64,size);}
+	
 	void finalize() {
 	  //aggregate the contraints, fill input_args's index, build global inputs
     
@@ -73,7 +76,7 @@ struct FUT {
 				if (gitr == sym_map.end()) {
 					gidx = inputs.size();
 					sym_map[itr.first] = gidx;
-					inputs.push_back(std::make_pair(itr.first,constraints[i]->inputs[itr.first]));
+					inputs.push_back(std::make_pair(itr.first, constraints[i]->inputs[itr.first]));
 					auto slot = cmap.find(gidx);
 					if (slot != cmap.end()) {
 						slot->second.push_back(i);
@@ -82,7 +85,7 @@ struct FUT {
 						a.push_back(i);
 						cmap.insert({gidx, a});
 					}
-          //cmap[gidx].push_back(constraints[i]);
+          		//cmap[gidx].push_back(constraints[i]);
 				} else {
 					gidx = gitr->second;
 					auto slot = cmap.find(gidx);
@@ -94,7 +97,7 @@ struct FUT {
 						//cmap.insert({gidx, a});
 						cmap[gidx] = a;
 					}
-          //cmap[gidx].push_back(constraints[i]);
+          		//cmap[gidx].push_back(constraints[i]);
 				}
 				meta->input_args_final[itr.second].second = gidx;  //update input_args
 			}
