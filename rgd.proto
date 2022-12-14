@@ -53,6 +53,7 @@ message JitRequest {
 	uint32 direction = 10;
 	uint32 sessionid = 11;
 	uint32 full = 12;
+  uint32 varnum = 13; // variable number
 }
 
 // The response message containing the greetings

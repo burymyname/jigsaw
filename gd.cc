@@ -396,7 +396,7 @@ bool gd_entry(struct FUT* fut) {
     if (fut->stopped) {
       break;
     }
-    cal_gradient(input, f0, grad,fut);
+    cal_gradient(input, f0, grad, fut);
 
     int g_i = 0;
 

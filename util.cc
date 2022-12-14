@@ -6,6 +6,8 @@
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <fstream>
+
 using namespace google::protobuf::io;
 using namespace rgd;
 const uint64_t kUsToS = 1000000;
@@ -168,3 +170,51 @@ bool saveRequest(
 		return suc;
 }
 
+uint64_t countExprVarNum(const JitRequest* req) {
+	if (req == nullptr) return 0;
+
+	uint64_t ret = 0;
+	for (auto i = 0; i < req->children_size(); ++i) {
+		ret += countExprVarNum(&req->children(i));
+	}
+
+	if (req->kind() == rgd::Read) {
+		++ret;
+	}
+
+	return ret;
+}
+
+static void do_print_File(const JitRequest* req, std::ofstream &ofs) {
+	ofs << get_name(req->kind()) << "(";
+	//std::cerr << req->name() << "(";
+	ofs << "width=" << req->bits() << ",";
+	//std::cerr << " hash=" << req->hash() << ",";
+	ofs << " label=" << req->label() << ",";
+	//std::cerr << " hash=" << req->hash() << ",";
+	if (req->kind() == rgd::Bool) {
+		ofs << req->value();
+	}
+	if (req->kind() == rgd::Constant) {
+		ofs << req->value() << ", ";
+	//	std::cerr << req->index();
+	}
+	if (req->kind() == rgd::Memcmp) {
+		ofs << req->value() << ", ";
+	//	std::cerr << req->index();
+	}
+	if (req->kind() == rgd::Read || req->kind() == rgd::Extract) {
+		ofs << req->index() << ", ";
+	}
+	for(int i = 0; i < req->children_size(); i++) {
+		do_print_File(&req->children(i), ofs);
+		if (i != req->children_size() - 1)
+			ofs << ", ";
+	}
+	ofs << ")";
+}
+
+void printExpression2File(const JitRequest* req, std::ofstream &of) {
+	do_print_File(req, of);
+	of << std::endl;
+}

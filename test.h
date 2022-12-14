@@ -15,6 +15,7 @@ class Constraint {
 public:
 	test_fn_type fn;
 	uint32_t comparison;
+	std::string fname;
 
 	//map the offset to the idx in inputs_args
 	// if const {false, const value}, if symbolic {true, index in the inputs}
@@ -23,6 +24,7 @@ public:
 	//map the offset to iv
 	std::unordered_map<uint32_t,uint8_t> inputs;
 	uint32_t const_num;
+	uint32_t var_num;
 };
 
 
@@ -37,7 +39,7 @@ struct FUT {
 	~FUT() { if (scratch_args) free(scratch_args); }
 	uint32_t num_exprs;
 	std::vector<std::shared_ptr<Constraint>> constraints;
-  std::vector<std::shared_ptr<ConsMeta>> constraintsmeta;
+  	std::vector<std::shared_ptr<ConsMeta>> constraintsmeta;
 
 	// offset and input value
 	std::vector<std::pair<uint32_t,uint8_t>> inputs;
@@ -52,11 +54,11 @@ struct FUT {
 	std::unordered_map<uint32_t,uint8_t> *rgd_solution;
 	std::unordered_map<uint32_t,uint8_t> *opti_solution;
 	std::unordered_map<uint32_t,uint8_t> *hint_solution;  
-  std::vector<uint64_t> orig_distances;
-  std::vector<uint64_t> distances;
+  	std::vector<uint64_t> orig_distances;
+  	std::vector<uint64_t> distances;
 	uint64_t* scratch_args;
 
-  std::unordered_map<uint32_t, std::vector<uint32_t>> cmap;
+  	std::unordered_map<uint32_t, std::vector<uint32_t>> cmap;
 	//void allocate_scratch_args(int size) {scratch_args = (uint8_t*)aligned_alloc(64,size);}
 	void finalize() {
 	  //aggregate the contraints, fill input_args's index, build global inputs

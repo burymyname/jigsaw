@@ -78,9 +78,12 @@ int core_start = 0;
 std::unique_ptr<GradJit> JIT;// = make_unique<GradJit>();
 uint64_t getTimeStamp();
 void printExpression(const JitRequest* req);
+void printExpression2File(const JitRequest* req, std::ofstream &of);
+uint64_t countExprVarNum(const JitRequest* req);
 uint64_t start_time;
 
 uint8_t input_buffer[64][8092];
+
 
 bool gd_entry(struct FUT* dut);
 
@@ -151,7 +154,8 @@ namespace rgd {
   struct myKV {
     std::shared_ptr<JitRequest> req;
     test_fn_type fn;
-    myKV(std::shared_ptr<JitRequest> areq, test_fn_type f) : req(areq), fn(f) {}
+    std::string fname;
+    myKV(std::shared_ptr<JitRequest> areq, test_fn_type f, std::string name) : req(areq), fn(f), fname(name) {}
   };
 
   struct nestKV {
@@ -306,20 +310,25 @@ static std::atomic<uint64_t> parsing2_total;
 static std::atomic<uint64_t> parsing_total3;
 static std::atomic<uint64_t> iterations_total;
 static std::atomic<uint64_t> gCmdIdx(0);
+
+static std::unordered_map<uint64_t, std::atomic<uint64_t>> vars_stat;
+static std::unordered_map<JitRequest, std::atomic<uint64_t>, RequestHash, RequestEqual> constr_stat;
 }
 
 
 static void dumpFut(FUT* fut) {
-  std::cout << "dumping fut start -------------" << std::endl;
+  // std::cerr << "dumping fut start -------------" << std::endl;
   //for(std::unordered_map<uint32_t,uint32_t>::iterator it=fut->global_map.begin();it!=fut->global_map.end();it++)
   //	std::cout << "first is " << it->first << " second is " << it->second << std::endl; 
   for (auto c : fut->constraints) {
-    printf("constraint comparsison is %d\n",c->comparison);
+    vars_stat[c->var_num]++;
+    // fprintf(stderr, "constraint comparsison is %d\n",c->comparison);
+    // fprintf(stderr, "var num: %d\n", c->var_num);
   }
-  for (auto c: fut->inputs) {
-    printf("offset %u and value %u\n",c.first,c.second);
-  }
-  std::cout << "dumping fut end-------------" << std::endl;
+  // for (auto c: fut->inputs) {
+  //   fprintf(stderr, "offset %u and value %u\n",c.first,c.second);
+  // }
+  // std::cerr << "dumping fut end-------------" << std::endl;
 }
 
 
@@ -371,6 +380,32 @@ static inline bool isRelational(uint32_t kind) {
     return false;
 }
 
+void splitRelationalExpr(JitRequest* req, std::vector<JitRequest*> &subreq) {
+  assert(isRelational(req->kind()) && "non-relational expr");
+	
+	for (int i = 0; i < req->children_size(); ++i) {
+    JitRequest* child = req->mutable_children(i);
+		if (child->kind() != rgd::Constant) {
+			subreq.push_back(child);
+		}
+	}
+}
+
+bool cmp(const std::pair<JitRequest, uint64_t> &x, 
+  const std::pair<JitRequest, uint64_t> &y) {
+  return x.second < y.second;
+}
+
+void dumpCon2File(std::vector<std::pair<JitRequest, uint64_t>> &vec, std::ofstream &ofs) {
+  uint64_t hit_total = 0;
+  for (auto &it : vec) {
+    ofs << "[constraint] ";
+    printExpression2File(&(it.first), ofs);
+    ofs << "[var]: " << countExprVarNum(&(it.first)) << " [hit]: " << it.second << std::endl;
+    hit_total += it.second;
+  }
+  ofs << "[total]: " << hit_total << std::endl;
+}
 
 static void analyzeExpr(JitRequest* request, bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot, bool &div, bool &hasZExt, bool &zext_bool, std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
   auto r1 = expr_cache.find(request->label());
@@ -449,6 +484,7 @@ static void mapArgs(JitRequest* req,
       llvm::APInt value(req->bits(),ref,10);
       iv = value.getZExtValue();
     }
+    constraint->var_num += 1;
     size_t length = req->bits()/8;
     for (int i=0;i<length;++i, iv>>=8) {
       uint32_t offset = req->index() + i;
@@ -1465,6 +1501,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     std::unordered_set<uint32_t> visited;
     std::shared_ptr<Constraint> constraint = std::make_shared<Constraint>();
     constraint->const_num = 0;
+    constraint->var_num = 0;
     constraint->comparison = adjusted_request->kind();
     mapArgs(adjusted_request,constraint,visited);
     std::shared_ptr<JitRequest> copied_req = std::make_shared<JitRequest>();
@@ -1478,19 +1515,31 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
       std::string funcName = "jutest" + std::to_string(id);
       addFunction(adjusted_request, constraint->local_map ,funcName, expr_cache);
       auto fn = performJit(id,threadId);
-      if (!fCache.insert(new struct myKV(copied_req, fn))) {
+      if (!fCache.insert(new struct myKV(copied_req, fn, funcName))) {
         delete res;
         res = nullptr;
       }
       constraint->fn = fn;
+      constraint->fname = funcName;
     } else {
       hit++;
       constraint->fn = res->fn;
+      constraint->fname = res->fname;
     }
 
     assert(isRelational(adjusted_request->kind()) && "non-relational expr");
+
+    // TODO: split relational expr
+    std::vector<JitRequest*> sublists;
+    splitRelationalExpr(copied_req.get(), sublists);
+    for (auto i : sublists) {
+      // printExpression(i);
+      constr_stat[*i]++;
+    }
+    
+
     fut->constraints.push_back(constraint);
-    consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()},constraint));
+    consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()}, constraint));
     //temp.insert({adjusted_request->sessionid()*1000000+adjusted_request->label()*100+adjusted_request->kind(), constraint});
   }
 
@@ -1676,7 +1725,7 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
   std::deque<FUT*> tasks;
   if (checkContra(cmd)) return -1;
   try {
-    parseRequest(opti, cmd, i, tasks,funcCache);
+    parseRequest(opti, cmd, i, tasks, funcCache);
     uint64_t parsing = getTimeStamp() - start;
     parsing_total += parsing;
 
@@ -1688,15 +1737,16 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
       dut->hint_solution = hint_solution;
       //dut->load_buf(fname);
       dut->load_hint();
-      bool suc = gd_entry(dut);
+      dumpFut(dut);
+      // bool suc = gd_entry(dut);
       uint64_t solving = getTimeStamp() - dut->start;
       solving_total += solving;
       iterations_total += dut->att;
       *iter  =  (*iter) + dut->att;
       *st = (*st) + getTimeStamp() - start_solving;
-      if (suc) {
-        break;
-      }
+      // if (suc) {
+      //   break;
+      // }
     }
     for (auto dut : tasks) {
       //free(dut->scratch_args);
@@ -1769,11 +1819,11 @@ void* rgdTask(void *threadarg) {
   my_data = (struct thread_data *) threadarg;
   int i  = my_data->thread_id;
   int idx = 0;//gCmdIdx.fetch_add(1,std::memory_order_relaxed);
-  while (idx<my_data->amount) {
+  while (idx < my_data->amount) {
     std::shared_ptr<JitCmdv2> cmd = allCmds[idx%my_data->amount];
     idx = gCmdIdx.fetch_add(1,std::memory_order_relaxed);
 #if NESTED_BRANCH
-    std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
+    std::shared_ptr<JitCmdv2> cmdDone = std::make_shared<JitCmdv2>();
     cmdDone->set_cmd(2);
     cmdDone->set_file_name(cmd->file_name());
     for(int i =0 ;i<cmd->expr_size();i++) {
@@ -1797,7 +1847,7 @@ void* rgdTask(void *threadarg) {
         targetReq->CopyFrom(*res->req);
       }
     }
-    std::shared_ptr<JitCmdv2> cmdDoneOpt =  std::make_shared<JitCmdv2>();
+    std::shared_ptr<JitCmdv2> cmdDoneOpt = std::make_shared<JitCmdv2>();
     cmdDoneOpt->set_cmd(2);
     JitRequest* targetReq = cmdDoneOpt->add_expr();
     targetReq->CopyFrom(cmdDone->expr(0));
@@ -1824,7 +1874,8 @@ void* rgdTask(void *threadarg) {
     uint64_t start = getTimeStamp();
 #if NESTED_BRANCH
     if (cmdDoneOpt->expr(0).kind() != rgd::Memcmp) {
-      int r = sendLocalCmd(true, cmdDoneOpt, i, Expr2FuncList[i],&rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
+      int r = sendLocalCmd(true, cmdDoneOpt, i, Expr2FuncList[i],
+        &rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
     }
 
     if (rgd_solution.size() != 0)  {
@@ -1832,7 +1883,8 @@ void* rgdTask(void *threadarg) {
       iter = 0;
       rgd_solution.clear();
       if (cmdDone->expr(0).kind() != rgd::Memcmp) {
-        int r = sendLocalCmd(false, cmdDone, i, Expr2FuncList[i],&rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
+        int r = sendLocalCmd(false, cmdDone, i, Expr2FuncList[i],
+          &rgd_solution, &opti_solution, &hint_solution, cmdDone->file_name(), &st, &iter);
       }
     } 
     //else {
@@ -1852,7 +1904,7 @@ void* rgdTask(void *threadarg) {
       gFi++;
     }
     if (gProcessed % 1000==0) {
-      std::cout << "processed" << gProcessed << " constraints" << std::endl;
+      std::cout << "processed " << gProcessed << " constraints" << std::endl;
       std::cout << "elapsed time is " << getTimeStamp() - start_time <<  " cons cache lookup " << parsing_total3 << " iter " << iterations_total << " solved " << gFi << std::endl;
     }
 
@@ -1991,7 +2043,7 @@ void* rgdTask(void *threadarg) {
         allexpr += cmd->expr_size();
         //building nested branches here consuming too much memory
 #if SINGLE_BRANCH
-        std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
+        std::shared_ptr<JitCmdv2> cmdDone = std::make_shared<JitCmdv2>();
         cmdDone->set_cmd(2);
         for(int i = 0 ;i < 1;i++) {
           JitRequest* targetReq = cmdDone->add_expr();
@@ -2016,13 +2068,13 @@ void* rgdTask(void *threadarg) {
       } while(suc);
       delete rawInput;
       close(fd);
-      printf("\rLoading In progress %d", ++i);
+      printf("\rLoading In progress %d ", ++i);
       fflush(stdout);
       if (allCmds.size() > LOADING_LIMIT)
         break;
     }
     i = 0;
-    printf("all count is %d, drop count is %d record number is %lu allexpr is %d\n",allcount,dropcount,allCmds.size(),allexpr);
+    printf("\nall count is %d, drop count is %d record number is %lu allexpr is %d\n",allcount,dropcount,allCmds.size(),allexpr);
     start_time = getTimeStamp();
     //ProfilerStart("pro.log");
     pthread_t threads[48];
@@ -2032,7 +2084,7 @@ void* rgdTask(void *threadarg) {
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
     for(int k  = 0; k < num_of_threads ; k++ ) {
       td[k].thread_id = k;
-      td[k].amount=allCmds.size();
+      td[k].amount = allCmds.size();
     }
     cpu_set_t cpuset;
     for(int k  = 0; k < num_of_threads; k++ ) {
@@ -2058,6 +2110,46 @@ void* rgdTask(void *threadarg) {
       << " irT " 	<< parsing2_total 
       << " hit " << hit
       << " mis " << miss << std::endl;
+
+    // uint64_t var_total = 0;
+    // for (auto &it : vars_stat) {
+    //   std::cout << "[var] " << it.first << " count: " << it.second << std::endl;
+    //   var_total += it.second;
+    // }
+    // std::cout << "[total] " << var_total << std::endl;
+
+    // Sort the constraints count
+    std::vector<std::vector<std::pair<JitRequest, uint64_t>>> c_vector(5);
+    // std::vector<std::pair<JitRequest, uint64_t>> c_vector1;
+    // std::vector<std::pair<JitRequest, uint64_t>> c_vector2;
+    // std::vector<std::pair<JitRequest, uint64_t>> c_vector3;
+    // std::vector<std::pair<JitRequest, uint64_t>> c_vector4;
+    // std::vector<std::pair<JitRequest, uint64_t>> c_vector5;
+
+    for (auto &it : constr_stat) {
+      uint64_t count = it.second;
+      uint64_t var_num = countExprVarNum(&(it.first));
+      if (var_num <= 4 && var_num > 0) {
+        c_vector[var_num-1].push_back(std::make_pair(it.first, count));
+      } else if (var_num != 0) {
+        c_vector[4].push_back(std::make_pair(it.first, count));
+      }
+    }
+
+    for (int i = 0; i < 5; ++i) {
+      std::sort(c_vector[i].begin(), c_vector[i].end(), cmp);  
+    }
+
+    // dump to file
+    for (int i = 0; i < 5; ++i) {
+      std::string stat_file = "stat" + std::to_string(i+1) + ".log";
+      std::ofstream outfile;
+      outfile.open(stat_file, std::ios::trunc | std::ios::out);
+      if (outfile.is_open()) {
+        dumpCon2File(c_vector[i], outfile);
+      }
+    }
+
   }
 
   int main(int argc, char** argv) {
@@ -2065,7 +2157,7 @@ void* rgdTask(void *threadarg) {
     int pin_core_start = 0;
     if (argc < 4) {
       printf("Use: ./rgd number_of_threads pin_core_start directory\n");
-      printf("Example: ./rgd 32 0 0 test_dir\n");
+      printf("Example: ./rgd 32 0 test_dir\n");
       return 0;
     }
     if (sscanf (argv[1], "%i", &num_of_threads) != 1) {
